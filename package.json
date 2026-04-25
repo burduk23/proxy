@@ -1,23 +1,14 @@
 {
-
- "name": "render-proxy",
-
- "version": "1.0.0",
-
- "description": "Simple HTTP-Proxy",
-
- "main": "server.js",
-
- "scripts": {
-
-  "start": "node server.js"
-
- },
-
- "dependencies": {
-
-  "http-proxy": "^1.18.1"
-
- }
-
+  "name": "render-proxy",
+  "version": "1.0.0",
+  "description": "WebSocket-to-TCP Bridge for Render",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "client": "node client.js"
+  },
+  "dependencies": {
+    "ws": "^8.20.0",
+    "socksv5": "^0.0.6"
+  }
 }
