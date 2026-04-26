@@ -2,6 +2,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const net = require('net');
 
+const VERSION = '1.1.0';
 const PORT = process.env.PORT || 8080;
 const AUTH_USER = process.env.AUTH_USER || 'dandon';
 const AUTH_PASS = process.env.AUTH_PASS || 'pulk';
@@ -27,10 +28,10 @@ wss.on('connection', (ws, req) => {
   let isAuthorized = false;
   let connectBuffer = [];
 
-  const remoteAddr = req.socket.remoteAddress;
-  console.log(`[WS] New connection from ${remoteAddr}`);
+  // Get real IP from Render/Proxy headers
+  const remoteAddr = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  console.log(`[WS v${VERSION}] New connection from ${remoteAddr}`);
 
-  // Auth check via headers
   const authHeader = req.headers['proxy-authorization'] || req.headers['authorization'];
   if (authHeader) {
     if (authHeader === `Basic ${AUTH_BASE64}` || authHeader === AUTH_STR) {
@@ -42,7 +43,6 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (data, isBinary) => {
-    // 1. If already connected, pipe data directly to target
     if (isConnected) {
       if (targetSocket && targetSocket.writable) {
         targetSocket.write(data);
@@ -50,13 +50,11 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // 2. If connection is in progress, buffer the data
     if (isConnecting) {
       connectBuffer.push(data);
       return;
     }
 
-    // 3. Handshake phase (must be JSON)
     if (isBinary) {
       ws.close(4003, 'Expected JSON handshake');
       return;
@@ -64,8 +62,6 @@ wss.on('connection', (ws, req) => {
 
     try {
       const msg = JSON.parse(data.toString());
-      
-      // Auth check via JSON if not already authorized
       if (!isAuthorized) {
         if (msg.auth === AUTH_STR) {
           isAuthorized = true;
@@ -86,7 +82,6 @@ wss.on('connection', (ws, req) => {
       console.log(`[WS] ${remoteAddr} -> Connecting to ${host}:${portNum}`);
       isConnecting = true;
       
-      // Create target socket
       targetSocket = net.connect({
         host: host,
         port: portNum,
@@ -94,9 +89,9 @@ wss.on('connection', (ws, req) => {
       });
 
       targetSocket.on('connect', () => {
-        console.log(`[Target] ${host}:${portNum} connected`);
+        console.log(`[Target] Connected to ${host}:${portNum}`);
         
-        // Send status FIRST to ensure tunnel is ready before data arrives
+        // Send status FIRST
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ status: 'connected', target: `${host}:${portNum}` }));
         }
@@ -104,88 +99,58 @@ wss.on('connection', (ws, req) => {
         isConnected = true;
         isConnecting = false;
         
-        // Flush buffered data from client to target
-        if (connectBuffer.length > 0) {
-          console.log(`[Target] Flushing ${connectBuffer.length} chunks to ${host}:${portNum}`);
-          while (connectBuffer.length > 0) {
-            const chunk = connectBuffer.shift();
-            if (targetSocket.writable) targetSocket.write(chunk);
-          }
+        // Flush buffer
+        while (connectBuffer.length > 0) {
+          const chunk = connectBuffer.shift();
+          if (targetSocket.writable) targetSocket.write(chunk);
         }
       });
 
       targetSocket.on('data', (chunk) => {
-        if (isConnected && ws.readyState === WebSocket.OPEN) {
-          ws.send(chunk, { binary: true });
-        }
+        if (ws.readyState === WebSocket.OPEN) ws.send(chunk, { binary: true });
       });
 
       targetSocket.on('end', () => {
-        console.log(`[Target] ${host}:${portNum} closed connection`);
+        console.log(`[Target] ${host}:${portNum} closed`);
         if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Target closed');
       });
 
       targetSocket.on('error', (err) => {
-        console.error(`[Target] Error for ${host}:${portNum}: ${err.message}`);
+        console.error(`[Target] Error ${host}:${portNum}: ${err.message}`);
         isConnecting = false;
         if (targetSocket) targetSocket.destroy();
         if (ws.readyState === WebSocket.OPEN) {
-          // Truncate error message to fit in close frame
           const errMsg = err.message.substring(0, 100);
           ws.close(1011, `Target error: ${errMsg}`);
         }
       });
 
       targetSocket.on('timeout', () => {
-        console.log(`[Target] Timeout for ${host}:${portNum}`);
+        console.log(`[Target] Timeout ${host}:${portNum}`);
         if (targetSocket) targetSocket.destroy();
         if (ws.readyState === WebSocket.OPEN) ws.close(1006, 'Target timeout');
       });
 
-      targetSocket.on('close', () => {
-        if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'Target socket closed');
-      });
-
     } catch (err) {
-      console.error(`[WS] Handshake error from ${remoteAddr}: ${err.message}`);
       isConnecting = false;
       if (ws.readyState === WebSocket.OPEN) ws.close(4000, 'Handshake failed');
     }
   });
 
-  ws.on('close', (code, reason) => {
-    console.log(`[WS] Connection closed for ${remoteAddr} (Code: ${code})`);
-    if (targetSocket) {
-      targetSocket.destroy();
-      targetSocket = null;
-    }
-  });
-
-  ws.on('error', (err) => {
-    console.error(`[WS] Error for ${remoteAddr}: ${err.message}`);
-    if (targetSocket) {
-      targetSocket.destroy();
-      targetSocket = null;
-    }
+  ws.on('close', (code) => {
+    console.log(`[WS] Closed for ${remoteAddr} (Code: ${code})`);
+    if (targetSocket) targetSocket.destroy();
   });
 });
 
-// Heartbeat to keep connection alive
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) {
-      console.log(`[WS] Terminating inactive client`);
-      return ws.terminate();
-    }
+    if (ws.isAlive === false) return ws.terminate();
     ws.isAlive = false;
     ws.ping();
   });
 }, 30000);
 
-wss.on('close', () => {
-  clearInterval(interval);
-});
-
 server.listen(PORT, () => {
-  console.log(`WebSocket bridge server is running on port ${PORT}`);
+  console.log(`WebSocket bridge server v${VERSION} running on port ${PORT}`);
 });
