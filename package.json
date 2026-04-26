@@ -8,7 +8,8 @@
     "client": "node client.js"
   },
   "dependencies": {
-    "ws": "^8.20.0",
-    "socksv5": "^0.0.6"
+    "dotenv": "^17.4.2",
+    "socksv5": "^0.0.6",
+    "ws": "^8.20.0"
   }
 }
